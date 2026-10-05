@@ -1,35 +1,3 @@
-#include <iostream>
-#include <string>
-#include <thread>
-#include <mutex>
-#include <condition_variable>
-#include <unistd.h>
-#include <sys/socket.h>
-#include <arpa/inet.h>
-using namespace std;
-
-const int PORT=45000;
-int s,room=-1; char role='-',symbol='-';
-char b[9]={'-','-','-','-','-','-','-','-','-'};
-bool running=true,myTurn=false,roomsReady=false;
-mutex coutMtx,boardMtx,stateMtx; condition_variable cv;
-
-string pad(int n,int k){ string x=to_string(n); return string(k-x.size(),'0')+x; }
-void protocol(string t,string d,string msg){ lock_guard<mutex> l(coutMtx); cout<<"\n["<<t<<" PROTOCOL] "<<d<<"\n-> "<<msg<<"\n"; }
-bool readN(char *x,int n){ int q,t=0; while(t<n&&(q=recv(s,x+t,n-t,0))>0)t+=q; return t==n; }
-string readText(int n){ string x(n,' '); if(n)readN(&x[0],n); return x; }
-void sendP(string m,string msg){ send(s,m.data(),m.size(),0); protocol("TX",m,msg); }
-void table(){ lock_guard<mutex> a(boardMtx),o(coutMtx); cout<<"\n "<<b[0]<<" | "<<b[1]<<" | "<<b[2]<<"\n---+---+---\n "<<b[3]<<" | "<<b[4]<<" | "<<b[5]<<"\n---+---+---\n "<<b[6]<<" | "<<b[7]<<" | "<<b[8]<<"\n"; }
-
-void receive(){
-    while(1){
-        char h; if(!readN(&h,1)){ lock_guard<mutex> l(stateMtx); running=false; cv.notify_all(); break; }
-        if(h=='l'){
-            char n[17]; readN(n,17); string x=readText(stoi(string(n,17)));
-            protocol("RX","l"+string(n,17)+x,"Lista de jugadores/usuarios recibida."); cout<<"Jugadores conectados: "<<x<<"\n"; continue;
-        }
-        if(h!='T')continue;
-        char op; readN(&op,1); string m="T"+string(1,op);
 
         if(op=='r'){
             char n[3]; readN(n,3); string x=readText(stoi(string(n,3)));
@@ -94,3 +62,67 @@ void move(){
 int main(int argc,char *argv[]){
     const char *ip=argc>1?argv[1]:"127.0.0.1"; s=socket(AF_INET,SOCK_STREAM,0); sockaddr_in a{};
     a.sin_family=AF_INET; a.sin_port=htons(PORT); inet_pton(AF_INET,ip,&a.sin_addr); connect(s,(sockaddr*)&a,sizeof(a));
+    cout<<"Conectado a "<<ip<<":"<<PORT<<"\n";
+
+    string nick; cout<<"\nNickname: "; cin>>nick;
+    sendP("N"+pad(nick.size(),7)+nick,"Enviando nickname: "+nick+".");
+    thread rx(receive);
+
+    int op;
+    while(role=='-'){
+        cout<<"\nMENU INICIAL\n"
+            <<"1. Crear una sala          -> TP + TC\n"
+            <<"2. Unirse a una sala       -> TP + TJ<nombre>\n"
+            <<"3. Ver sala como espectador-> TV + TJ<nombre>\n"
+            <<"4. Listar jugadores        -> L\n"
+            <<"5. Listar salas            -> TR\n"
+            <<"6. Salir                    -> Q\nOpcion: ";
+        cin>>op;
+        if(op==1){ role='P'; sendP("TP","Te registraste como jugador."); sendP("TC","Creando una sala con tu nickname: "+nick+"."); }
+        else if(op==2){ role='P'; sendP("TP","Te registraste como jugador."); joinSelected(); }
+        else if(op==3){ role='V'; sendP("TV","Te registraste como espectador."); joinSelected(); }
+        else if(op==4) sendP("L","Solicitando lista de jugadores.");
+        else if(op==5) requestRooms();
+        else if(op==6){ sendP("Q","Saliendo del servidor."); { lock_guard<mutex> l(stateMtx); running=false; } shutdown(s,SHUT_RDWR); }
+        if(!running)break;
+    }
+
+    while(true){
+        { lock_guard<mutex> l(stateMtx); if(!running)break; }
+
+        if(role=='P'){
+            unique_lock<mutex> l(stateMtx); cv.wait(l,[]{return myTurn||!running;}); if(!running)break; l.unlock();
+            bool done=false;
+            while(!done){
+                cout<<"\nMENU DE TU TURNO\n"
+                    <<"1. Mover              -> TM<1-9>\n"
+                    <<"2. Mostrar tablero    -> local\n"
+                    <<"3. Listar jugadores   -> L\n"
+                    <<"4. Listar salas       -> TR\n"
+                    <<"5. Salir               -> Q\nOpcion: ";
+                cin>>op;
+                if(op==1){ move(); done=true; }
+                else if(op==2) table();
+                else if(op==3) sendP("L","Solicitando lista de jugadores.");
+                else if(op==4) requestRooms();
+                else if(op==5){ sendP("Q","Saliendo del servidor."); { lock_guard<mutex> x(stateMtx); running=false; } shutdown(s,SHUT_RDWR); done=true; }
+            }
+        }else{
+            cout<<"\nMENU ESPECTADOR\n"
+                <<"1. Ver salas           -> TR\n"
+                <<"2. Cambiar de sala     -> TJ<nombre>\n"
+                <<"3. Mostrar tablero     -> local\n"
+                <<"4. Listar jugadores    -> L\n"
+                <<"5. Salir                -> Q\nOpcion: ";
+            cin>>op;
+            if(op==1) requestRooms();
+            else if(op==2) joinSelected();
+            else if(op==3) table();
+            else if(op==4) sendP("L","Solicitando lista de jugadores.");
+            else if(op==5){ sendP("Q","Saliendo del servidor."); { lock_guard<mutex> l(stateMtx); running=false; } shutdown(s,SHUT_RDWR); }
+        }
+    }
+
+    if(rx.joinable()) rx.join();
+    close(s);
+}
